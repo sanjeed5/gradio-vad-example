@@ -3,7 +3,6 @@ import os
 import time
 import traceback
 from dataclasses import dataclass, field
-import groq
 
 import gradio as gr
 import librosa
@@ -13,45 +12,80 @@ import spaces
 import xxhash
 from datasets import Audio
 
-# Initialize Groq client
-api_key = os.environ.get("GROQ_API_KEY")
-if not api_key:
-    raise ValueError("Please set the GROQ_API_KEY environment variable.")
-client = groq.Client(api_key=api_key)
+# Import configuration
+import config
 
-def process_whisper_response(completion):
+# Initialize API client based on configuration
+api_provider = config.API_PROVIDER
+if api_provider == 'groq':
+    import groq
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise ValueError("Please set the GROQ_API_KEY environment variable.")
+    client = groq.Client(api_key=api_key)
+elif api_provider == 'openai':
+    import openai
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("Please set the OPENAI_API_KEY environment variable.")
+    client = openai.OpenAI(api_key=api_key)
+else:
+    raise ValueError(f"Unsupported API provider: {api_provider}")
+
+def process_whisper_response(completion, provider):
     """
     Process Whisper transcription response and return text or null based on no_speech_prob
     
     Args:
         completion: Whisper transcription response object
+        provider: The API provider ('openai' or 'groq')
         
     Returns:
         str or None: Transcribed text if no_speech_prob <= 0.7, otherwise None
     """
-    if completion.segments and len(completion.segments) > 0:
-        no_speech_prob = completion.segments[0].get('no_speech_prob', 0)
-        print("No speech prob:", no_speech_prob)
+    if provider == 'groq':
+        if completion.segments and len(completion.segments) > 0:
+            no_speech_prob = completion.segments[0].get('no_speech_prob', 0)
+            print("No speech prob:", no_speech_prob)
 
-        if no_speech_prob > 0.7:
-            return None
-            
-        return completion.text.strip()
+            if no_speech_prob > 0.7:
+                return None
+                
+            return completion.text.strip()
+    else:  # OpenAI
+        # OpenAI doesn't provide a no_speech_prob in the same way
+        # We'll just return the text
+        if hasattr(completion, 'text'):
+            return completion.text.strip()
+        else:
+            return completion
     
     return None
 
-def transcribe_audio(client, file_name):
+def transcribe_audio(client, file_name, provider):
     if file_name is None:
         return None
 
     try:
         with open(file_name, "rb") as audio_file:
-            response = client.audio.transcriptions.with_raw_response.create(
-                model="whisper-large-v3-turbo",
-                file=("audio.wav", audio_file),
-                response_format="verbose_json",
-            )
-            completion = process_whisper_response(response.parse())
+            if provider == 'groq':
+                response = client.audio.transcriptions.with_raw_response.create(
+                    model=config.MODELS['groq']['audio'],
+                    file=("audio.wav", audio_file),
+                    response_format="verbose_json",
+                )
+                completion = process_whisper_response(response.parse(), provider)
+            else:  # OpenAI
+                audio_file_obj = open(file_name, "rb")
+                response = client.audio.transcriptions.create(
+                    model=config.MODELS['openai']['audio'],
+                    file=audio_file_obj,
+                    response_format="text",
+                    language="en"
+                )
+                audio_file_obj.close()
+                completion = process_whisper_response(response, provider)
+            
             print(completion)
             
         return completion
@@ -60,13 +94,13 @@ def transcribe_audio(client, file_name):
         return f"Error in transcription: {str(e)}"
 
 
-# Function to generate AI chat response using Llama model
-def generate_chat_completion(client, history):
+# Function to generate AI chat response using configured model
+def generate_chat_completion(client, history, provider):
     messages = []
     messages.append(
         {
             "role": "system",
-            "content": "In conversation with the user, ask questions to estimate and provide (1) total calories, (2) protein, carbs, and fat in grams, (3) fiber and sugar content. Only ask *one question at a time*. Be conversational and natural.",
+            "content": config.SYSTEM_PROMPT,
         }
     )
 
@@ -74,12 +108,21 @@ def generate_chat_completion(client, history):
         messages.append(message)
 
     try:
-        # Use Llama-3.2 model for conversation
-        completion = client.chat.completions.create(
-            model="llama-3.2-11b-vision-preview",
-            messages=messages,
-        )
-        assistant_message = completion.choices[0].message.content
+        if provider == 'groq':
+            # Use Llama model from Groq
+            completion = client.chat.completions.create(
+                model=config.MODELS['groq']['chat'],
+                messages=messages,
+            )
+            assistant_message = completion.choices[0].message.content
+        else:  # OpenAI
+            # Use GPT-4o mini from OpenAI
+            completion = client.chat.completions.create(
+                model=config.MODELS['openai']['chat'],
+                messages=messages,
+            )
+            assistant_message = completion.choices[0].message.content
+            
         return assistant_message
     except Exception as e:
         return f"Error in generating chat completion: {str(e)}"
@@ -105,14 +148,23 @@ def response(state: AppState, audio: tuple):
 
     sf.write(file_name, audio[1], audio[0], format="wav")
 
-    # Initialize Groq client
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
-        raise ValueError("Please set the GROQ_API_KEY environment variable.")
-    client = groq.Client(api_key=api_key)
+    # Initialize client based on provider
+    provider = config.API_PROVIDER
+    if provider == 'groq':
+        import groq
+        api_key = os.environ.get("GROQ_API_KEY")
+        if not api_key:
+            raise ValueError("Please set the GROQ_API_KEY environment variable.")
+        client = groq.Client(api_key=api_key)
+    else:  # OpenAI
+        import openai
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("Please set the OPENAI_API_KEY environment variable.")
+        client = openai.OpenAI(api_key=api_key)
 
     # Transcribe the audio file
-    transcription = transcribe_audio(client, file_name)
+    transcription = transcribe_audio(client, file_name, provider)
     if transcription:
         if transcription.startswith("Error"):
             transcription = "Error in audio transcription."
@@ -121,7 +173,7 @@ def response(state: AppState, audio: tuple):
         state.conversation.append({"role": "user", "content": transcription})
 
         # Generate assistant response
-        assistant_message = generate_chat_completion(client, state.conversation)
+        assistant_message = generate_chat_completion(client, state.conversation, provider)
 
         # Append the assistant's message in the proper format
         state.conversation.append({"role": "assistant", "content": assistant_message})
