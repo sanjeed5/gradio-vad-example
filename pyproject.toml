@@ -1,0 +1,16 @@
+[project]
+name = "gradio-vad-example"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=3.4.1",
+    "gradio>=5.22.0",
+    "groq>=0.20.0",
+    "librosa>=0.11.0",
+    "numpy>=2.1.3",
+    "soundfile>=0.13.1",
+    "spaces>=0.32.0",
+    "xxhash>=3.5.0",
+]
