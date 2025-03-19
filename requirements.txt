@@ -1,5 +1,6 @@
 gradio
 groq
+openai
 numpy
 soundfile
 librosa
